@@ -1,0 +1,109 @@
+#pragma kernel CalculateProceduralGeometry
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "CrossGrassHelper.hlsl"
+
+#define MAX_CROSS_COUNT 5
+#define MAX_VERTEX_POINTS 4
+
+struct SourceVertex {
+    float3 position;
+    float3 normal;
+};
+StructuredBuffer<SourceVertex> _SourceVertices;
+int _NumSourceVertices;
+
+struct DrawVertex {
+    float3 positionWS;
+    float2 uv;
+};
+struct DrawTriangle {
+    float3 lightingNormalWS;
+    DrawVertex vertices[3];
+};
+AppendStructuredBuffer<DrawTriangle> _DrawTriangles;
+
+struct IndirectArgs {
+    uint numVerticesPerInstance;
+    uint numInstances;
+    uint startVertexIndex;
+    uint startInstanceIndex;
+};
+RWStructuredBuffer<IndirectArgs> _IndirectArgs;
+
+float _Width;
+float _Height;
+int _CrossCount;
+
+TEXTURE2D(_WindNoiseTexture); SAMPLER(sampler_WindNoiseTexture);
+float _WindSpeed;
+float _WindScale;
+float _WindPower;
+
+float3 GetWindAxis(float3 positionWS, float3 normalWS) {
+    float2 windUV = positionWS.xz * _WindScale + _Time.y * _WindSpeed;
+    float2 windNoise = SAMPLE_TEXTURE2D_LOD(_WindNoiseTexture, sampler_WindNoiseTexture, windUV, 0).xy * 2 - 1;
+    return cross(normalWS, float3(windNoise.x, 0, windNoise.y));
+}
+float3x3 GetTransformations(float3 positionWS, float3 normalWS, float rotation, float2 uv) {
+    float3 tangentWS = float3(1, 0, 0);
+    float3 bitangentWS = normalize(cross(tangentWS, normalWS));
+    float3x3 ttw = transpose(float3x3(tangentWS, bitangentWS, normalWS));
+
+    float3x3 wind = AngleAxis3x3(_WindPower * uv.y, GetWindAxis(positionWS, normalWS));
+
+    return mul(ttw, AngleAxis3x3(rotation, bitangentWS));
+}
+
+DrawVertex GetVertex(float3 anchorWS, float2 uv, float3x3 transform) {
+    float3 offsetTS = float3((uv.x - 0.5) * _Width, 0, uv.y * _Height);
+    float3 offsetWS = mul(transform, offsetTS);
+
+    DrawVertex v = (DrawVertex)0;
+    v.positionWS = anchorWS + offsetWS;
+    v.uv = uv;
+    return v;
+}
+
+[numthreads(128,1,1)]
+void CalculateProceduralGeometry (uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _NumSourceVertices) return;
+
+    SourceVertex v = _SourceVertices[id.x];
+    
+    int crossCount = min(MAX_CROSS_COUNT, _CrossCount);
+    int vertexCount = min(4, MAX_VERTEX_POINTS);
+    int triCount = 2;
+
+    DrawVertex vertices[MAX_CROSS_COUNT][MAX_VERTEX_POINTS];
+    for (int i = 0; i < vertexCount / 2; i++) {
+        uint ui = (uint)i;
+
+        float x = (float)(ui % 2);
+        float y = (float)(ui / (vertexCount / 4));
+        float deg180 = 3.2;
+        float3x3 transform;
+
+        for (int j = 0; j < crossCount; j++) {
+            transform = GetTransformations(v.position, v.normal, j * (deg180 / crossCount), float2(x, y));
+            vertices[j][i * 2] = GetVertex(v.position, float2(x, y), transform);
+            vertices[j][i * 2 + 1] = GetVertex(v.position, float2(1 - x, y), transform);
+        }
+    }
+    
+    for (i = 0; i < triCount; i++) {
+        uint ui = (uint)i;
+
+        DrawTriangle tri;
+        for (int j = 0; j < crossCount; j++) {
+            tri = (DrawTriangle)0;
+            tri.lightingNormalWS = v.normal;
+            tri.vertices[0] = vertices[j][(ui + ui) % vertexCount];
+            tri.vertices[1] = vertices[j][(ui + ui + 1) % vertexCount];
+            tri.vertices[2] = vertices[j][(ui + ui + 2) % vertexCount];
+            _DrawTriangles.Append(tri);
+        }
+    }
+
+    InterlockedAdd(_IndirectArgs[0].numVerticesPerInstance, triCount * crossCount * 3);
+}

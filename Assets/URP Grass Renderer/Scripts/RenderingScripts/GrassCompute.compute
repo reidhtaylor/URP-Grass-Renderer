@@ -1,0 +1,187 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Main
+
+#pragma warning (disable : 3571)
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "GrassBladesComputeHelp.hlsl"
+
+#define MAX_BLADE_SEGMENTS 40
+#define MAX_BLADE_POINTS MAX_BLADE_SEGMENTS * 2 + 1
+
+struct SourceVertex {
+    float3 positionWS;
+    float3 normalWS;
+};
+StructuredBuffer<SourceVertex> _SourceVertices;
+StructuredBuffer<int> _SourceTriangles;
+
+struct DrawVertex {
+    float3 positionWS;
+    float height;
+};
+struct DrawTriangle {
+    float3 lightingNormalWS;
+    DrawVertex vertices[3];
+};
+AppendStructuredBuffer<DrawTriangle> _DrawTriangles;
+
+struct IndirectArgs {
+    uint numVerticesPerInstance;
+    uint numInstances;
+    uint startVertexIndex;
+    uint startInstanceIndex;
+};
+RWStructuredBuffer<IndirectArgs> _IndirectArgsBuffer;
+
+struct FlattenData {
+    float3 positionWS;
+    float radius;
+    float weight;
+    float maxLifetime;
+    float lifetime;
+};
+StructuredBuffer<FlattenData> _FlattenData;
+int _NumFlattenData;
+
+int _NumSourceVertices;
+
+int _MaxBladeSegments;
+float _MaxBendAngle;
+float _BladeCurvature;
+float _BladeHeight;
+float _BladeHeightVariance;
+float _BladeWidth;
+float _BladeWidthVariance;
+
+float4 _CamPos;
+
+float _LodDistance;
+float _ClipDistance;
+float _ClipOffset;
+
+TEXTURE2D(_WindNoiseTexture); SAMPLER(sampler_WindNoiseTexture);
+float _WindTimeMult;
+float _WindPosMult;
+float _WindAmplitude;
+
+int GetNumSegments(float3 positionWS, float distanceToCamera) {
+    float lodValue = 1 - (min(_LodDistance, distanceToCamera) / _LodDistance);
+    lodValue = max(_CamPos.w, lodValue);
+    int lodSegments = max(1, (int)(_MaxBladeSegments * lodValue));
+
+    return min(MAX_BLADE_SEGMENTS, lodSegments);
+}
+
+float2 GetBladeDimensions(float3 positionWS) {
+    float width = (randNegative1to1(positionWS, 0) * _BladeWidthVariance) + _BladeWidth;
+    float height = (randNegative1to1(positionWS, 1) * _BladeHeightVariance) + _BladeHeight;
+    return float2(width, height);
+}
+float GetBladeSize(float distanceToCamera) {
+    float dLerp = 1 - min(_ClipDistance, distanceToCamera) / _ClipDistance;
+    float clipSize = min(1, max(_CamPos.w, min(1, dLerp * _ClipOffset)));
+    return clipSize;
+    // return (sin(_Time.y * 4) + 1) / 2;
+}
+
+float2 SampleWind(float2 uv) {
+    return SAMPLE_TEXTURE2D_LOD(_WindNoiseTexture, sampler_WindNoiseTexture, uv, 0).xy;
+}
+float3 GetWindAxis(float3 positionWS, float3 normalWS) {
+    float2 windUV = positionWS.xz * _WindPosMult + _Time.y * _WindTimeMult;
+    float2 windNoise = SampleWind(windUV) * 2 - 1;
+    return cross(normalWS, float3(windNoise.x, 0, windNoise.y));
+}
+float3x3 GetFlattenMatrix(float3 positionWS, float3 normalWS) {
+    float falloffSmoothness = 0.4;
+    float d, normalizedDistance, weight;
+    
+    FlattenData fd;
+
+    float3x3 flattenMatrix = AngleAxis3x3(0, normalWS);
+    float3x3 currentFlatten = flattenMatrix;
+    for (int i = 1; i < _NumFlattenData; i++) {
+        fd = _FlattenData[i];
+
+        d = distance(fd.positionWS, positionWS);
+        normalizedDistance = 1 - (min(fd.radius, d) / fd.radius);
+
+        weight = fd.weight * (fd.lifetime / fd.maxLifetime) * 1.75;
+        weight = weight * min(1, normalizedDistance * 3);
+
+        currentFlatten = AngleAxis3x3(weight, cross(normalWS, normalize(positionWS - fd.positionWS)));
+        // currentFlatten *= AngleAxis3x3(weight * normalizedDistance, normalWS);
+
+        // Find whatever force is more apparent... Who knows why using min works?
+        flattenMatrix = min(flattenMatrix, currentFlatten);
+    }
+    
+    return flattenMatrix;
+}
+
+float3x3 GetTransformations(float v, float3x3 twistMatrix, float3x3 tsToWs, float maxBend, float3 windAxis, float3 positionWS, float3 normalWS) {
+    float3x3 bendMatrix = AngleAxis3x3(maxBend * pow(v, _BladeCurvature), float3(1, 0, 0));
+    float3x3 windMatrix = AngleAxis3x3(_WindAmplitude * v, windAxis);
+    
+    return mul(GetFlattenMatrix(positionWS, normalWS), mul(windMatrix, mul(tsToWs, mul(twistMatrix, bendMatrix))));
+}
+
+DrawVertex SetupBladePoint(float3 anchorWS, float2 dimensions, float3x3 tsToWs, float2 uv) {
+    float3 offsetTS = float3((uv.x - 0.5) * dimensions.x, 0, uv.y * dimensions.y);
+    float3 offsetWS = mul(tsToWs, offsetTS);
+    float3 positionWS = anchorWS + offsetWS;
+
+    DrawVertex output = (DrawVertex)0;
+    output.positionWS = positionWS;
+    output.height = uv.y;
+    return output;
+}
+
+[numthreads(126,1,1)]
+void Main (uint3 id : SV_DispatchThreadID)
+{
+    if ((int)(id.x + id.y) >= _NumSourceVertices)
+        return;
+    
+    SourceVertex v = _SourceVertices[(id.x + id.y)];
+    float3 positionWS = v.positionWS;
+    float3 normalWS = v.normalWS;
+    float3x3 tsToWs;
+    GetNormalAndTSToWSMatrix(v.normalWS, tsToWs);
+
+    float distanceToCamera = distance(_CamPos.xyz, positionWS);
+
+    float2 dimensions = GetBladeDimensions(positionWS) * GetBladeSize(distanceToCamera);
+    float3x3 twistMatrix = AngleAxis3x3(rand(positionWS, 2) * PI * 2, float3(0, 0, 1));
+    float maxBend = rand(positionWS, 3) * PI * 0.5f * _MaxBendAngle;
+    float3 windAxis = GetWindAxis(positionWS, normalWS);
+
+    int numBladeSegments = GetNumSegments(positionWS, distanceToCamera);
+    DrawVertex vertices[MAX_BLADE_POINTS];
+
+    for (int i = 0; i < numBladeSegments; i++) {
+        float v = i / (float)numBladeSegments;
+        float u = 0.5 - (1 - v) * 0.5;
+
+        float3x3 transform = GetTransformations(v, twistMatrix, tsToWs, maxBend, windAxis, positionWS, normalWS);
+
+        vertices[i * 2] = SetupBladePoint(positionWS, dimensions, transform, float2(u, v));
+        vertices[i * 2 + 1] = SetupBladePoint(positionWS, dimensions, transform, float2(1 - u, v));
+    }
+
+    float3x3 tipTransform = GetTransformations(1, twistMatrix, tsToWs, maxBend, windAxis, positionWS, normalWS);
+    vertices[numBladeSegments * 2] = SetupBladePoint(positionWS, dimensions, tipTransform, float2(0.5, 1));
+
+    int numTriangles = (numBladeSegments - 1) * 2 + 1;
+    for (i = 0; i < numTriangles; i++) {
+        DrawTriangle tri = (DrawTriangle)0;
+        tri.lightingNormalWS = normalWS;
+        tri.vertices[0] = vertices[i];
+        tri.vertices[1] = vertices[i + 1];
+        tri.vertices[2] = vertices[i + 2];
+        _DrawTriangles.Append(tri);
+    }
+
+    InterlockedAdd(_IndirectArgsBuffer[0].numVerticesPerInstance, numTriangles * 3);
+}
