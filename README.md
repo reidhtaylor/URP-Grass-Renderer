@@ -28,6 +28,6 @@ From my tests, it works great on MacOS, iOS, Android, and (Obviously) PCs. A lar
 
 • Adjust Wind values for a strong storm or light breeze
 
+https://user-images.githubusercontent.com/60525644/185245290-492e1a1c-41ff-4356-80e4-bf03fb3f7a5a.mp4
 
-https://user-images.githubusercontent.com/60525644/185022770-e4029248-a5cf-4a26-a53e-fc79f129c678.mov
-
+https://user-images.githubusercontent.com/60525644/185245303-be7635c6-caf0-4e0e-9794-a434a7d0919b.mp4
