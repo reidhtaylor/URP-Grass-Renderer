@@ -1,4 +1,4 @@
-# Scorpion studios - Unity URP Grass Renderer
+# Scorpion studios - Unity URP Grass Renderer - Compute Shaders
 
 • Compatible with iOS/MacOS & Android/PC
 
