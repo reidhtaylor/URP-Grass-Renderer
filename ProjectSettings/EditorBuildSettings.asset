@@ -6,6 +6,6 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
-    path: Assets/URP Grass Renderer/Demo/DemoScene.unity
+    path: Assets/STS URP Grass Renderer/Demo/DemoScene.unity
     guid: 84507bb0a3b45411bbccd6b8418d4dea
   m_configObjects: {}
