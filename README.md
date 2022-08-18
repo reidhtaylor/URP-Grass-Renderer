@@ -2,6 +2,8 @@
 
 • Compatible with iOS/MacOS & Android/PC
 
+• Unity Version: 2021.3.7f1
+
 <div>
   <img src="https://user-images.githubusercontent.com/60525644/185021291-f69ac80d-17f6-45ad-9a7b-76d7a4710f1b.jpg" width="300">
   <img src="https://user-images.githubusercontent.com/60525644/185021236-de131947-5310-40d0-8047-f03915d72c2e.jpg" width="300">
